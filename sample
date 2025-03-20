@@ -1,0 +1,106 @@
+import sys
+import pandas as pd
+import uvicorn
+import faiss
+import heapq
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from sklearn.metrics.pairwise import cosine_similarity
+from data_preprocess import DataPreprocessing
+from io import StringIO
+pre_process = DataPreprocessing()
+class recommendation(BaseModel):
+    input_data: str
+
+config_params = {
+    "vector_conversion" : "bert",
+    "identify_similarity" : "cosine"
+}
+
+# Create a FastAPI class-based structure
+class MyApp:
+    def __init__(self):
+        # Initialize the FastAPI app
+        self.app = FastAPI()
+        # Register routes
+        self._register_routes()
+        self.app.add_event_handler("startup", self.intialize_model)
+
+    def _register_routes(self):
+        """Method to register the routes"""
+        self.app.add_api_route("/product/recommendation", self.recommendation, methods=["POST"])
+
+    async def intialize_model(self):
+        self.master_org_data = pd.read_csv("input_data/master_data.csv")
+        if config_params['vector_conversion'] == 'label_encoding' :
+            master_data = pd.read_csv('label_encoding/encoded_data.csv')
+        elif config_params['vector_conversion'] == 'bert':
+            master_data = pd.read_csv('bert_embedding/encoded_data.csv')
+        elif config_params['vector_conversion'] == 'fasttext':
+            master_data = pd.read_csv('fasttext/encoded_data.csv')
+        elif config_params['vector_conversion'] == 'word2vec':
+            master_data = pd.read_csv('word2vec/encoded_data.csv')
+
+        self.master_data_values = master_data.values
+
+        if config_params['identify_similarity'] == 'faiss':
+            self.index = faiss.IndexFlatL2(self.master_data_values.shape[1])
+            self.index.add(self.master_data_values)
+
+    async def load_and_predict(self, payload):
+        recommended_data = ""
+        try:
+            df = pd.read_csv(StringIO(payload.input_data))
+            if config_params['vector_conversion'] == 'label_encoding':
+                preprocessed, error = pre_process.label_encoder_vector_conversion(df, "inference")
+            if config_params['vector_conversion'] == 'bert':
+                preprocessed, error = pre_process.bert_conversion(df, "inference")
+            if config_params['vector_conversion'] == 'fasttext':
+                preprocessed, error = pre_process.fasttext_conversion(df, "inference")
+            if config_params['vector_conversion'] == 'word2vec':
+                preprocessed, error = pre_process.word2vec_conversion(df, "inference")
+
+            input_data_values = preprocessed.values
+            if config_params['identify_similarity'] == 'faiss':
+                distances, indices = self.index.search(input_data_values, 20)
+                nd_list = indices.tolist()[0]
+                selected_rows = self.master_org_data.iloc[nd_list]
+
+            elif config_params['identify_similarity'] == 'cosine':
+                similarity = cosine_similarity(input_data_values, self.master_data_values)
+                nd_list = similarity.tolist()[0]
+                indices_with_value = heapq.nlargest(20, enumerate(nd_list), key=lambda x: x[1])
+                indices = [index for index, value in indices_with_value]
+                selected_rows = self.master_org_data.iloc[indices]
+            recommended_data = selected_rows.to_csv(index=False)
+
+        except Exception as exep:
+            print(exep)
+        return recommended_data
+
+    async def recommendation(self, payload: recommendation):
+        recommended_data = ""
+        try:
+            recommended_data = await self.load_and_predict(payload)
+
+        except Exception:
+            error = f'Error in verification_submit {sys.exc_info()}'
+            print(error)
+        return recommended_data
+
+# Create an instance of the class to run the FastAPI application
+my_app = MyApp()
+
+# The FastAPI app instance
+app = my_app.app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=8010)
