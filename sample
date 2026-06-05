@@ -1,106 +1,224 @@
-import sys
-import pandas as pd
-import uvicorn
-import faiss
-import heapq
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-from sklearn.metrics.pairwise import cosine_similarity
-from data_preprocess import DataPreprocessing
-from io import StringIO
-pre_process = DataPreprocessing()
-class recommendation(BaseModel):
-    input_data: str
+import re
 
-config_params = {
-    "vector_conversion" : "bert",
-    "identify_similarity" : "cosine"
+UNICODE_REPLACEMENTS = {
+    # Arrows
+    '\u2192': ' to ',        # →
+    '\u2190': ' from ',      # ←
+    '\u2191': ' up ',        # ↑
+    '\u2193': ' down ',      # ↓
+    '\u21d2': ' implies ',   # ⇒
+    '\u21d4': ' iff ',       # ⇔
+    '\u2194': ' to ',        # ↔
+
+    # Dashes & Hyphens
+    '\u2013': '-',           # – en dash
+    '\u2014': '-',           # — em dash
+    '\u2012': '-',           # ‒ figure dash
+    '\u2015': '-',           # ― horizontal bar
+    '\ufe58': '-',           # ﹘ small em dash
+    '\ufe63': '-',           # ﹣ small hyphen
+    '\uff0d': '-',           # － fullwidth hyphen
+
+    # Quotes
+    '\u2018': "'",           # ' left single
+    '\u2019': "'",           # ' right single
+    '\u201a': "'",           # ‚ single low
+    '\u201b': "'",           # ‛ single high reversed
+    '\u201c': '"',           # " left double
+    '\u201d': '"',           # " right double
+    '\u201e': '"',           # „ double low
+    '\u201f': '"',           # ‟ double high reversed
+    '\u2039': '<',           # ‹ single left angle
+    '\u203a': '>',           # › single right angle
+    '\u00ab': '<<',          # « left double angle
+    '\u00bb': '>>',          # » right double angle
+
+    # Spaces & Invisible
+    '\u00a0': ' ',           # non-breaking space
+    '\u200b': '',            # zero width space
+    '\u200c': '',            # zero width non-joiner
+    '\u200d': '',            # zero width joiner
+    '\u2060': '',            # word joiner
+    '\ufeff': '',            # BOM / zero width no-break space
+    '\u2002': ' ',           # en space
+    '\u2003': ' ',           # em space
+    '\u2004': ' ',           # three-per-em space
+    '\u2005': ' ',           # four-per-em space
+    '\u2009': ' ',           # thin space
+    '\u200a': ' ',           # hair space
+    '\u202f': ' ',           # narrow no-break space
+    '\u205f': ' ',           # medium mathematical space
+
+    # Currency
+    '\u20b9': 'Rs.',         # ₹ Indian Rupee
+    '\u20ac': 'EUR',         # € Euro
+    '\u00a3': 'GBP',         # £ Pound
+    '\u00a5': 'JPY',         # ¥ Yen
+    '\u00a2': 'cents',       # ¢ Cent
+    '\u20a8': 'Rs.',         # ₨ Rupee sign
+    '\u0024': '$',           # $ Dollar (fullwidth)
+    '\u20b1': 'PHP',         # ₱ Philippine Peso
+    '\u20a9': 'KRW',         # ₩ Korean Won
+    '\u20b4': 'UAH',         # ₴ Ukrainian Hryvnia
+
+    # Math & Symbols
+    '\u00d7': 'x',           # × multiplication
+    '\u00f7': '/',           # ÷ division
+    '\u00b1': '+/-',         # ± plus-minus
+    '\u2260': '!=',          # ≠ not equal
+    '\u2264': '<=',          # ≤ less than or equal
+    '\u2265': '>=',          # ≥ greater than or equal
+    '\u221e': 'infinity',    # ∞ infinity
+    '\u2248': '~=',          # ≈ approximately
+    '\u00b2': '2',           # ² superscript 2
+    '\u00b3': '3',           # ³ superscript 3
+    '\u00b9': '1',           # ¹ superscript 1
+    '\u221a': 'sqrt',        # √ square root
+    '\u03c0': 'pi',          # π pi
+    '\u2211': 'sum',         # ∑ summation
+    '\u222b': 'integral',    # ∫ integral
+
+    # Punctuation & Special
+    '\u2026': '...',         # … ellipsis
+    '\u2022': '-',           # • bullet
+    '\u2023': '-',           # ‣ triangular bullet
+    '\u25cf': '-',           # ● black circle bullet
+    '\u25aa': '-',           # ▪ black small square
+    '\u2043': '-',           # ⁃ hyphen bullet
+    '\u00b7': '.',           # · middle dot
+    '\u2010': '-',           # ‐ hyphen
+    '\u2011': '-',           # ‑ non-breaking hyphen
+    '\u00a6': '|',           # ¦ broken bar
+    '\u2016': '||',          # ‖ double vertical line
+    '\u2020': '+',           # † dagger
+    '\u2021': '++',          # ‡ double dagger
+    '\u00a7': 'S.',          # § section sign
+    '\u00b6': 'P.',          # ¶ pilcrow/paragraph
+    '\u00a9': '(c)',         # © copyright
+    '\u00ae': '(R)',         # ® registered
+    '\u2122': '(TM)',        # ™ trademark
+    '\u00b0': ' degrees',    # ° degree
+    '\u2032': "'",           # ′ prime
+    '\u2033': "''",          # ″ double prime
+
+    # Fractions
+    '\u00bc': '1/4',         # ¼
+    '\u00bd': '1/2',         # ½
+    '\u00be': '3/4',         # ¾
+    '\u2153': '1/3',         # ⅓
+    '\u2154': '2/3',         # ⅔
+    '\u215b': '1/8',         # ⅛
+    '\u215c': '3/8',         # ⅜
+    '\u215d': '5/8',         # ⅝
+    '\u215e': '7/8',         # ⅞
+
+    # Accented Latin (Common)
+    '\u00e0': 'a',           # à
+    '\u00e1': 'a',           # á
+    '\u00e2': 'a',           # â
+    '\u00e3': 'a',           # ã
+    '\u00e4': 'a',           # ä
+    '\u00e5': 'a',           # å
+    '\u00e6': 'ae',          # æ
+    '\u00e7': 'c',           # ç
+    '\u00e8': 'e',           # è
+    '\u00e9': 'e',           # é
+    '\u00ea': 'e',           # ê
+    '\u00eb': 'e',           # ë
+    '\u00ec': 'i',           # ì
+    '\u00ed': 'i',           # í
+    '\u00ee': 'i',           # î
+    '\u00ef': 'i',           # ï
+    '\u00f0': 'd',           # ð
+    '\u00f1': 'n',           # ñ
+    '\u00f2': 'o',           # ò
+    '\u00f3': 'o',           # ó
+    '\u00f4': 'o',           # ô
+    '\u00f5': 'o',           # õ
+    '\u00f6': 'o',           # ö
+    '\u00f8': 'o',           # ø
+    '\u00f9': 'u',           # ù
+    '\u00fa': 'u',           # ú
+    '\u00fb': 'u',           # û
+    '\u00fc': 'u',           # ü
+    '\u00fd': 'y',           # ý
+    '\u00fe': 'th',          # þ
+    '\u00ff': 'y',           # ÿ
+    '\u00c0': 'A',           # À
+    '\u00c1': 'A',           # Á
+    '\u00c2': 'A',           # Â
+    '\u00c3': 'A',           # Ã
+    '\u00c4': 'A',           # Ä
+    '\u00c5': 'A',           # Å
+    '\u00c6': 'AE',          # Æ
+    '\u00c7': 'C',           # Ç
+    '\u00c8': 'E',           # È
+    '\u00c9': 'E',           # É
+    '\u00ca': 'E',           # Ê
+    '\u00cb': 'E',           # Ë
+    '\u00cc': 'I',           # Ì
+    '\u00cd': 'I',           # Í
+    '\u00ce': 'I',           # Î
+    '\u00cf': 'I',           # Ï
+    '\u00d0': 'D',           # Ð
+    '\u00d1': 'N',           # Ñ
+    '\u00d2': 'O',           # Ò
+    '\u00d3': 'O',           # Ó
+    '\u00d4': 'O',           # Ô
+    '\u00d5': 'O',           # Õ
+    '\u00d6': 'O',           # Ö
+    '\u00d8': 'O',           # Ø
+    '\u00d9': 'U',           # Ù
+    '\u00da': 'U',           # Ú
+    '\u00db': 'U',           # Û
+    '\u00dc': 'U',           # Ü
+    '\u00dd': 'Y',           # Ý
+    '\u00de': 'TH',          # Þ
+    '\u00df': 'ss',          # ß
+
+    # Check / Cross Marks
+    '\u2713': '(check)',     # ✓
+    '\u2714': '(check)',     # ✔
+    '\u2715': '(x)',         # ✕
+    '\u2716': '(x)',         # ✖
+    '\u2717': '(x)',         # ✗
+    '\u2718': '(x)',         # ✘
+    '\u2610': '[ ]',         # ☐ ballot box
+    '\u2611': '[x]',         # ☑ ballot box checked
+    '\u2612': '[x]',         # ☒ ballot box crossed
+
+    # Superscript / Subscript
+    '\u00aa': 'a',           # ª feminine ordinal
+    '\u00ba': 'o',           # º masculine ordinal
+    '\u2070': '0',           # ⁰
+    '\u2074': '4',           # ⁴
+    '\u2075': '5',           # ⁵
+    '\u2076': '6',           # ⁶
+    '\u2077': '7',           # ⁷
+    '\u2078': '8',           # ⁸
+    '\u2079': '9',           # ⁹
 }
 
-# Create a FastAPI class-based structure
-class MyApp:
-    def __init__(self):
-        # Initialize the FastAPI app
-        self.app = FastAPI()
-        # Register routes
-        self._register_routes()
-        self.app.add_event_handler("startup", self.intialize_model)
-
-    def _register_routes(self):
-        """Method to register the routes"""
-        self.app.add_api_route("/product/recommendation", self.recommendation, methods=["POST"])
-
-    async def intialize_model(self):
-        self.master_org_data = pd.read_csv("input_data/master_data.csv")
-        if config_params['vector_conversion'] == 'label_encoding' :
-            master_data = pd.read_csv('label_encoding/encoded_data.csv')
-        elif config_params['vector_conversion'] == 'bert':
-            master_data = pd.read_csv('bert_embedding/encoded_data.csv')
-        elif config_params['vector_conversion'] == 'fasttext':
-            master_data = pd.read_csv('fasttext/encoded_data.csv')
-        elif config_params['vector_conversion'] == 'word2vec':
-            master_data = pd.read_csv('word2vec/encoded_data.csv')
-
-        self.master_data_values = master_data.values
-
-        if config_params['identify_similarity'] == 'faiss':
-            self.index = faiss.IndexFlatL2(self.master_data_values.shape[1])
-            self.index.add(self.master_data_values)
-
-    async def load_and_predict(self, payload):
-        recommended_data = ""
-        try:
-            df = pd.read_csv(StringIO(payload.input_data))
-            if config_params['vector_conversion'] == 'label_encoding':
-                preprocessed, error = pre_process.label_encoder_vector_conversion(df, "inference")
-            if config_params['vector_conversion'] == 'bert':
-                preprocessed, error = pre_process.bert_conversion(df, "inference")
-            if config_params['vector_conversion'] == 'fasttext':
-                preprocessed, error = pre_process.fasttext_conversion(df, "inference")
-            if config_params['vector_conversion'] == 'word2vec':
-                preprocessed, error = pre_process.word2vec_conversion(df, "inference")
-
-            input_data_values = preprocessed.values
-            if config_params['identify_similarity'] == 'faiss':
-                distances, indices = self.index.search(input_data_values, 20)
-                nd_list = indices.tolist()[0]
-                selected_rows = self.master_org_data.iloc[nd_list]
-
-            elif config_params['identify_similarity'] == 'cosine':
-                similarity = cosine_similarity(input_data_values, self.master_data_values)
-                nd_list = similarity.tolist()[0]
-                indices_with_value = heapq.nlargest(20, enumerate(nd_list), key=lambda x: x[1])
-                indices = [index for index, value in indices_with_value]
-                selected_rows = self.master_org_data.iloc[indices]
-            recommended_data = selected_rows.to_csv(index=False)
-
-        except Exception as exep:
-            print(exep)
-        return recommended_data
-
-    async def recommendation(self, payload: recommendation):
-        recommended_data = ""
-        try:
-            recommended_data = await self.load_and_predict(payload)
-
-        except Exception:
-            error = f'Error in verification_submit {sys.exc_info()}'
-            print(error)
-        return recommended_data
-
-# Create an instance of the class to run the FastAPI application
-my_app = MyApp()
-
-# The FastAPI app instance
-app = my_app.app
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Build single compiled regex for performance
+_UNICODE_PATTERN = re.compile(
+    '|'.join(re.escape(k) for k in UNICODE_REPLACEMENTS.keys())
 )
 
-if __name__ == '__main__':
-    uvicorn.run(app, host="0.0.0.0", port=8010)
+def sanitize_unicode(text):
+    """Replace all known unicode characters before DB insert. No fallback needed."""
+    if not isinstance(text, str):
+        return text
+    return _UNICODE_PATTERN.sub(lambda m: UNICODE_REPLACEMENTS[m.group(0)], text)
+
+
+# Usage
+texts = [
+    'For the period 2024-01-01 → 2026-06-04, the count of FAR cases is 0.',
+    'Amount: ₹5,000 paid — status ✓',
+    'Range: 10 ≤ x ≤ 100 … approx ≈ 50',
+    'Copyright © 2024 Emphas™',
+    'Résumé of José — naïve café',
+]
+
+for t in texts:
+    print(sanitize_unicode(t))
