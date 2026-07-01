@@ -24,3 +24,15 @@ Step 9 – Review the AI results
 A preview of the filled data will be shown on screen. Review it, then click Continue to Export.
 Step 10 – Download the final report
 Click Download xlsx to download the completed report in Excel format.
+
+
+This guide walks you through the Multiple Product Request feature in the application. This feature allows you to request information for multiple products at once by using a downloadable Excel template.
+Instead of entering product details one by one, you can simply download the template, fill in the product names, and upload it back to the application. The built-in AI will then automatically fill in all the remaining product information for you.
+By the end of this guide, you will be able to:
+
+Download and fill the product request template
+Upload it to the application
+Use the AI-filling feature to auto-populate product details
+Export and download the final report in Excel format
+
+This process is designed to save time and reduce manual effort, making it easier to handle large volumes of product data efficiently.
